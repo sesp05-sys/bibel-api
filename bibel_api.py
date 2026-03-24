@@ -29,6 +29,7 @@ _DATA_DIR = os.environ.get("BIBLE_DATA_DIR", os.path.join(_BASE_DIR, "data"))
 _kjv = None
 _nor = None
 _versification_map = None
+_red_letter = None
 
 
 def _load_kjv():
@@ -38,6 +39,23 @@ def _load_kjv():
         with open(path, "r", encoding="utf-8") as f:
             _kjv = json.load(f)
     return _kjv
+
+
+def _load_red_letter():
+    """Load KJV red-letter word-index mapping.
+
+    Format: {book_name: {chapter: {verse: [[startWord, endWord], ...]}}}
+    Word indices are 0-based, matching words extracted by re.findall(r'[a-zA-Z]+', text).
+    """
+    global _red_letter
+    if _red_letter is None:
+        path = os.path.join(_DATA_DIR, "kjv_red_letter.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                _red_letter = json.load(f)
+        else:
+            _red_letter = {}
+    return _red_letter
 
 
 def _load_nor():
@@ -126,7 +144,7 @@ _BOOK_ALIASES_NO = {
     "ester": 17, "est": 17, "esters bok": 17,
     "job": 18, "jobs bok": 18,
     "salmene": 19, "salme": 19, "sal": 19, "salmenes bok": 19,
-    "ordspråkene": 20, "ordsp": 20, "salomos ordspråk": 20,
+    "ordspråkene": 20, "ordsp": 20, "ord": 20, "salomos ordspråk": 20,
     "forkynneren": 21, "fork": 21,
     "høysangen": 22, "høys": 22,
     "jesaja": 23, "jes": 23, "esaias": 23,
@@ -591,6 +609,55 @@ def create_bible_blueprint():
 
         return jsonify({"query": query, "count": len(results), "results": results})
 
+    @bp.route("/api/redletter")
+    def api_red_letter():
+        """Get red-letter word ranges for a chapter or verse.
+
+        Returns word-index ranges for Words of Jesus in KJV text.
+        Word indices match re.findall(r'[a-zA-Z]+', verse_text).
+
+        Query params:
+            book: English book name (e.g. "Matthew", "1 Corinthians")
+            chapter: chapter number (optional — returns all chapters if omitted)
+            verse: verse number (optional — returns all verses in chapter if omitted)
+
+        Response format:
+            {chapter: {verse: [[startWordIdx, endWordIdx], ...]}}
+        """
+        rl = _load_red_letter()
+        book = request.args.get("book", "").strip()
+        chapter = request.args.get("chapter", "").strip()
+        verse = request.args.get("verse", "").strip()
+
+        if not book:
+            # Return list of books that have red-letter data
+            return jsonify({
+                "books": [b for b in rl if any(rl[b].values())],
+                "description": "KJV Red Letter — Words of Jesus word-index ranges",
+            })
+
+        book_data = rl.get(book, {})
+        if not book_data:
+            return jsonify({"error": f"No red-letter data for '{book}'"}), 404
+
+        if chapter and verse:
+            ranges = book_data.get(chapter, {}).get(verse)
+            if not ranges:
+                return jsonify({"book": book, "chapter": int(chapter), "verse": int(verse), "red_letter": False})
+            return jsonify({"book": book, "chapter": int(chapter), "verse": int(verse), "red_letter": True, "ranges": ranges})
+
+        if chapter:
+            ch_data = book_data.get(chapter, {})
+            return jsonify({"book": book, "chapter": int(chapter), "verses": ch_data})
+
+        return jsonify({"book": book, "chapters": book_data})
+
+    @bp.route("/api/redletter/full")
+    def api_red_letter_full():
+        """Return the complete red-letter mapping (for client-side caching)."""
+        rl = _load_red_letter()
+        return jsonify(rl)
+
     return bp
 
 
@@ -615,6 +682,10 @@ def create_app():
                 "/api/books": "List all books",
                 "/api/chapters/43": "List chapters in a book",
                 "/api/search?q=beginning": "Search verse text",
+                "/api/redletter": "List books with red-letter data",
+                "/api/redletter?book=Matthew&chapter=3": "Red-letter ranges for a chapter",
+                "/api/redletter?book=John&chapter=3&verse=16": "Red-letter ranges for a verse",
+                "/api/redletter/full": "Complete red-letter mapping (for caching)",
             },
         })
 
