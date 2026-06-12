@@ -477,10 +477,15 @@ def create_bible_blueprint():
     bp = Blueprint("bible_api", __name__)
 
     @bp.after_request
-    def ensure_utf8(response):
+    def after_request(response):
+        # Sett CORS-headerne ÉN gang (headers[...] = overskriver; .add ville duplisert,
+        # og nettlesere avviser doble Access-Control-Allow-Origin)
         if response.content_type and "application/json" in response.content_type:
             data = response.get_data(as_text=True)
-            return Response(data, content_type="application/json; charset=utf-8")
+            response = Response(data, content_type="application/json; charset=utf-8")
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
         return response
 
     @bp.route("/api/verse")
