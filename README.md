@@ -46,11 +46,13 @@ GET /api/verse?ref=Joh+3:16
 Referanser godtar både norske og engelske boknavn og vanlige forkortelser
 (`Joh`, `John`, `1 Mos`, `Gen`, `Sal`, `Ps` …), enkeltvers og versområder (`Sal 23:1-6`).
 
-## Nøkkelfunksjon: versifikasjonsmapping
+## Versifikasjonsmapping
 
-KJV og Norsk 1930 nummererer ikke alltid versene likt (særlig i Salmenes overskrifter).
-API-et oversetter automatisk mellom de to systemene, slik at `ref=Sal+23` gir samme vers
-i begge oversettelsene uansett hvilken nummerering du spør med.
+KJV og Norsk 1930 nummererer ikke alltid versene likt (særlig i salmer med overskrift).
+API-et har en mapping (19 bøker, ~1300 justerte adresser) som retter opp de fleste av disse
+forskjellene. For kapitler uten forskyvning stiller versene opp likt i begge oversettelsene
+(f.eks. `ref=Sal+23`). Merk: salmer med overskrift kan fortsatt ha én-vers-forskyvning i
+enkelte tilfeller — mappingen er et hjelpemiddel, ikke en garanti.
 
 ## Kjøre lokalt
 

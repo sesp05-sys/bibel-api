@@ -28,8 +28,17 @@ _DATA_DIR = os.environ.get("BIBLE_DATA_DIR", os.path.join(_BASE_DIR, "data"))
 # ---------------------------------------------------------------------------
 _kjv = None
 _nor = None
+_nor_native = None
+_vmap_materialized = None
 _versification_map = None
 _red_letter = None
+
+# Strip ALLE versifikasjons-hint (f.eks. "(3:2)") uansett plassering i teksten,
+# og kollaps dobbelt mellomrom. (Tidligere ble kun LEDENDE hint fjernet, som
+# etterlot "(3:2)" midt i sammenslåtte/tittel-vers.)
+_HINT_ANY = re.compile(r"\s*\(\d+:\d+\)\s*")
+def _strip_hints(text):
+    return _HINT_ANY.sub(" ", text).strip()
 
 
 def _load_kjv():
@@ -65,6 +74,26 @@ def _load_nor():
         with open(path, "r", encoding="utf-8") as f:
             _nor = json.load(f)
     return _nor
+
+
+def _load_nor_native():
+    """Ren norsk 1930 i NO-egen versifikasjon (overskrifter som vers 1)."""
+    global _nor_native
+    if _nor_native is None:
+        path = os.path.join(_DATA_DIR, "nor1930_native.json")
+        with open(path, "r", encoding="utf-8") as f:
+            _nor_native = json.load(f)
+    return _nor_native
+
+
+def _load_vmap():
+    """Materialisert NO<->KJV-mapping: {no_to_kjv, kjv_to_no}."""
+    global _vmap_materialized
+    if _vmap_materialized is None:
+        path = os.path.join(_DATA_DIR, "versification_map.json")
+        with open(path, "r", encoding="utf-8") as f:
+            _vmap_materialized = json.load(f)
+    return _vmap_materialized
 
 
 # ---------------------------------------------------------------------------
@@ -427,8 +456,6 @@ def lookup_verses(book_id, chapter, verse_start=None, verse_end=None, translatio
         v_start = verse_start
         v_end = verse_end or verse_start
 
-    par_re = re.compile(r"^\(\d+:\d+\)\s*")
-
     for v in range(v_start, v_end + 1):
         entry = {"verse": v}
 
@@ -450,8 +477,7 @@ def lookup_verses(book_id, chapter, verse_start=None, verse_end=None, translatio
                     and ch_str in nor["bible"][book_code]
                     and v_str in nor["bible"][book_code][ch_str]):
                 text = nor["bible"][book_code][ch_str][v_str]
-                text = par_re.sub("", text)  # Strip versification hints
-                entry["nor"] = text
+                entry["nor"] = _strip_hints(text)  # Strip ALL versification hints
 
         if "kjv" in entry or "nor" in entry:
             result["verses"].append(entry)
@@ -465,6 +491,64 @@ def lookup_verses(book_id, chapter, verse_start=None, verse_end=None, translatio
     result["reference_no"] = name_no + ref_suffix
     result["reference_en"] = name_en + ref_suffix
 
+    return result if result["verses"] else None
+
+
+def lookup_verses_native(book_id, chapter, verse_start=None, verse_end=None, translation="both"):
+    """Slå opp vers i NORSK 1930 sin egen versifikasjon (overskrifter = vers 1).
+
+    Samme retur-form som lookup_verses. Norsk tekst hentes fra det rene native-
+    lageret; KJV-kolonnen krysskobles via den materialiserte mappingen.
+    """
+    book_code = _book_id_to_code(book_id)
+    if not book_code:
+        return None
+
+    name_no, name_en = _CANONICAL_NAMES.get(book_id, ("?", "?"))
+    native = _load_nor_native()
+    kjv = _load_kjv() if translation in ("kjv", "both") else None
+    no_to_kjv = _load_vmap()["no_to_kjv"].get(book_code, {})
+
+    nb = native["bible"].get(book_code, {})
+    ch_str = str(chapter)
+    if ch_str not in nb:
+        return None
+
+    if verse_start is None:
+        v_start, v_end = 1, max(int(k) for k in nb[ch_str].keys())
+    else:
+        v_start = verse_start
+        v_end = verse_end or verse_start
+
+    result = {
+        "book_id": book_id, "book_no": name_no, "book_en": name_en,
+        "chapter": chapter, "verse_start": verse_start, "verse_end": verse_end,
+        "versification": "native", "verses": [],
+    }
+
+    for v in range(v_start, v_end + 1):
+        entry = {"verse": v}
+        if translation in ("nor", "both") and str(v) in nb.get(ch_str, {}):
+            entry["nor"] = nb[ch_str][str(v)]
+        if kjv is not None:
+            kref = no_to_kjv.get(f"{chapter}:{v}")
+            if kref:
+                kc, kv = kref.split(":")
+            else:
+                kc, kv = ch_str, str(v)
+            kbook = kjv["bible"].get(book_code, {})
+            if kc in kbook and kv in kbook[kc]:
+                entry["kjv"] = kbook[kc][kv]
+        if "kjv" in entry or "nor" in entry:
+            result["verses"].append(entry)
+
+    ref_suffix = f" {chapter}"
+    if verse_start:
+        ref_suffix += f":{verse_start}"
+        if verse_end and verse_end != verse_start:
+            ref_suffix += f"-{verse_end}"
+    result["reference_no"] = name_no + ref_suffix
+    result["reference_en"] = name_en + ref_suffix
     return result if result["verses"] else None
 
 
@@ -503,6 +587,9 @@ def create_bible_blueprint():
         lang = request.args.get("lang", "both").lower()
         if lang not in ("kjv", "nor", "both"):
             lang = "both"
+        # vers=native → norsk 1930 sin egen versifikasjon (overskrifter = vers 1).
+        # Default (kjv) beholder eksisterende kontrakt uendret.
+        vers = request.args.get("vers", "kjv").lower()
 
         if not ref:
             return jsonify({"error": "Missing 'ref' parameter. Example: /api/verse?ref=Joh+3:16"}), 400
@@ -511,7 +598,8 @@ def create_bible_blueprint():
         if not parsed:
             return jsonify({"error": f"Could not parse reference: {ref}"}), 400
 
-        result = lookup_verses(
+        lookup_fn = lookup_verses_native if vers == "native" else lookup_verses
+        result = lookup_fn(
             parsed["book_id"], parsed["chapter"],
             parsed["verse_start"], parsed["verse_end"],
             translation=lang,
@@ -567,7 +655,6 @@ def create_bible_blueprint():
 
         results = []
         q_lower = query.lower()
-        par_re = re.compile(r"^\(\d+:\d+\)\s*")
 
         if lang in ("kjv", "both"):
             kjv = _load_kjv()
@@ -596,7 +683,7 @@ def create_bible_blueprint():
                 book = nor["bible"].get(book_code, {})
                 for ch_str, chapter in book.items():
                     for v_str, text in chapter.items():
-                        clean_text = par_re.sub("", text)
+                        clean_text = _strip_hints(text)
                         if q_lower in clean_text.lower():
                             bid = nor["books"].index(book_code) + 1
                             name_no, name_en = _CANONICAL_NAMES.get(bid, ("?", "?"))
