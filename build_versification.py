@@ -81,7 +81,14 @@ def build(src_nor, wp_dir, outdir):
 
     deduped = copy.deepcopy(nor)
     native_bible, fwd = {}, {}
-    stats = {"deduped":0, "merges":0, "titles":0, "native_verses":0}
+    stats = {"deduped":0, "merges":0, "titles":0, "native_verses":0, "interpolert":0}
+    # Hvem gjør krav på hvilken native-adresse. Tilordningene under overskriver
+    # bare hverandre (og dict-inverteringen av fwd mister duplikater), så uten
+    # denne bokføringen forsvinner et vers sporløst når to KJV-vers lander på
+    # samme adresse. Rapporteres av verify().
+    krav = {}
+    def ta(book, na_ch, na_v, kjv_ch, kjv_v):
+        krav.setdefault((book, f"{na_ch}:{na_v}"), []).append(f"{kjv_ch}:{kjv_v}")
 
     for book, chapters in bible.items():
         native_bible.setdefault(book, {}); fwd.setdefault(book, {})
@@ -89,6 +96,23 @@ def build(src_nor, wp_dir, outdir):
             kjv_ch = int(ch_str)
             for v_str, text in verses.items():
                 kjv_v = int(v_str)
+                # Neste vers' hint forteller hvor DETTE verset hører hjemme:
+                # står 6:2 på (5:21), er 6:1 nødvendigvis 5:20. Kilden mangler
+                # hintet på det første verset i et forskjøvet parti, og uten
+                # dette havnet det på sin egen KJV-adresse — oppå et annet vers.
+                nabo = LEAD.match(verses.get(str(kjv_v + 1), "") or "")
+                arvet = None
+                if nabo:
+                    na, nb = int(nabo.group(1)), int(nabo.group(2))
+                    # SAMMENSLÅING: naboens adresse er allerede min egen — de to
+                    # KJV-versene deler ett native-vers. Da skal jeg IKKE flyttes
+                    # ett hakk ned (det ville dyttet kollisjonen over på verset
+                    # foran); MERGES-tabellen er riktig sted. Vakten fanger den.
+                    if not (na == kjv_ch and nb == kjv_v) and nb > 1:
+                        arvet = (na, nb - 1)
+                    # Aldri interpoler oppå noe som alt er tatt
+                    if arvet and (book, f"{arvet[0]}:{arvet[1]}") in krav:
+                        arvet = None
                 clean, hint_addr = dedup(text)
                 if clean != text:
                     deduped["bible"][book][ch_str][v_str] = clean
@@ -102,15 +126,24 @@ def build(src_nor, wp_dir, outdir):
                     native_bible[book].setdefault(str(nb_ch),{})[str(nb_v)] = B
                     fwd[book][f"{na_ch}:{na_v}"] = f"{kjv_ch}:{kjv_v}"
                     fwd[book][f"{nb_ch}:{nb_v}"] = f"{kjv_ch}:{kjv_v}"
+                    ta(book, na_ch, na_v, kjv_ch, kjv_v)
+                    ta(book, nb_ch, nb_v, kjv_ch, kjv_v)
                     stats["merges"] += 1; stats["native_verses"] += 2
                 elif hint_addr:
                     no_ch, no_v = hint_addr
                     native_bible[book].setdefault(str(no_ch),{})[str(no_v)] = strip_hints(clean)
                     fwd[book][f"{no_ch}:{no_v}"] = f"{kjv_ch}:{kjv_v}"
+                    ta(book, no_ch, no_v, kjv_ch, kjv_v)
                     stats["native_verses"] += 1
                 else:
-                    native_bible[book].setdefault(ch_str,{})[v_str] = strip_hints(clean)
-                    fwd[book][f"{kjv_ch}:{kjv_v}"] = f"{kjv_ch}:{kjv_v}"
+                    # Uten hint: arv adressen fra naboen når den finnes, ellers
+                    # er native == KJV (det normale i uforskjøvede partier).
+                    no_ch, no_v = arvet if arvet else (kjv_ch, kjv_v)
+                    if arvet:
+                        stats["interpolert"] += 1
+                    native_bible[book].setdefault(str(no_ch),{})[str(no_v)] = strip_hints(clean)
+                    fwd[book][f"{no_ch}:{no_v}"] = f"{kjv_ch}:{kjv_v}"
+                    ta(book, no_ch, no_v, kjv_ch, kjv_v)
                     stats["native_verses"] += 1
 
     # salme-overskrifter som native NO vers 1 (+ 2)
@@ -131,11 +164,18 @@ def build(src_nor, wp_dir, outdir):
               open(f"{outdir}/versification_map.json","w",encoding="utf-8"), ensure_ascii=False)
     json.dump({str(k):v for k,v in sorted(titles.items())},
               open(f"{outdir}/psalm_titles.json","w",encoding="utf-8"), ensure_ascii=False, indent=1)
-    return stats, deduped, native_bible
+    return stats, deduped, native_bible, krav
 
-def verify(src_nor, deduped, native_bible):
+def verify(src_nor, deduped, native_bible, krav=None):
     nor = json.load(open(src_nor, encoding="utf-8"))["bible"]
+    names = json.load(open(src_nor, encoding="utf-8")).get("names", {})
     problems = []
+    # 0) KOLLISJON: to KJV-vers på samme native-adresse. Den sist tilordnede
+    #    vinner, og den andre finnes verken i native-fila eller i kartet.
+    for (b, adr), kjv in sorted((krav or {}).items()):
+        if len(kjv) > 1:
+            problems.append(f"KOLLISJON {names.get(b, b)} native {adr} ← KJV "
+                            f"{', '.join(kjv)} (kun {kjv[-1]} overlever)")
     # 1) ingen dobling/midt-hint igjen i native
     for b,chs in native_bible.items():
         for c,vs in chs.items():
@@ -161,11 +201,11 @@ def verify(src_nor, deduped, native_bible):
 if __name__ == "__main__":
     src = "/opt/bibel-api/data/nor1930.json"
     outdir = sys.argv[1] if len(sys.argv) > 1 else "/tmp/bibel_build"
-    stats, deduped, native = build(src, "/tmp/wp_psalms", outdir)
+    stats, deduped, native, krav = build(src, "/tmp/wp_psalms", outdir)
     print("Bygget →", outdir)
     for k,v in stats.items(): print(f"  {k}: {v}")
     print("\n=== VERIFISERING ===")
-    probs = verify(src, deduped, native)
+    probs = verify(src, deduped, native, krav)
     if not probs:
         print("  ✅ INGEN problemer: ingen hint i native, alle salmer stemmer, ingen rest-dobling")
     else:
