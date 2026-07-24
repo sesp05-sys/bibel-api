@@ -1,0 +1,14 @@
+# Kjøremiljø
+venv/
+__pycache__/
+*.pyc
+
+# Backup-filer
+*.bak
+*.bak-*
+
+# Lokale data som IKKE skal publiseres (bot, abonnenter, preferanser)
+bibel_bot.py
+bibel_plan_subs.json
+bibel_prefs.json
+heartlight_plan.json
