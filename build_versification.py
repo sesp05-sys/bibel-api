@@ -15,6 +15,33 @@ HINT = re.compile(r'\((\d+):(\d+)\)')
 LEAD = re.compile(r'^\s*\((\d+):(\d+)\)\s*')
 TWO_VERSE = {51, 52, 54, 60}
 
+# To KJV-vers utgjør ETT norsk vers (motsatt vei av MERGES under). Teksten
+# skjøtes, og BEGGE KJV-adressene peker på det samme norske verset.
+# Verifisert mot Bibelselskapet (bibel.no, Bokmål 1930):
+#   Dan 10  har 21 vers, der v18 rommer KJV 10:18+10:19
+#   Apg  4  har 36 vers, der v36 rommer KJV 4:36+4:37
+#   2 Kor 13 har 13 vers, der v12 rommer KJV 13:12+13:13
+JOINS = {
+    ("27O",10,18): (10,18),
+    ("44N",4,36):  (4,36),
+    ("47N",13,12): (13,12),
+}
+
+# Adresser som verken hint eller nabo kan røpe — kapittel 10 i Daniel trekker
+# til seg KJV 11:1 som sitt siste vers. Uten dette står KJV 11:1 på 11:1 og
+# hele Daniel 11 blir liggende ett hakk feil, uten at noe varsler om det.
+ADRESSER = {
+    ("27O",11,1): (10,21),
+}
+
+# Hele kapitler som ligger forskjøvet uten at ET ENESTE hint røper det — den
+# feilklassen kollisjonsvakten IKKE ser, siden ingenting overlapper. Når Dan 10
+# tar KJV 11:1, må resten av Dan 11 rykke ett hakk ned: KJV 11:2 blir 11:1, og
+# kapitlet får 44 vers mot KJVs 45.
+KAP_SKIFT = {
+    ("27O",11): -1,
+}
+
 # Vers-sammenslåinger: KJV (book,ch,v) -> [(no_ch,no_v) for A, for B]
 MERGES = {
     ("09O",20,42): [(20,42),(20,43)],
@@ -81,7 +108,7 @@ def build(src_nor, wp_dir, outdir):
 
     deduped = copy.deepcopy(nor)
     native_bible, fwd = {}, {}
-    stats = {"deduped":0, "merges":0, "titles":0, "native_verses":0, "interpolert":0}
+    stats = {"deduped":0, "merges":0, "titles":0, "native_verses":0, "interpolert":0, "joins":0}
     # Hvem gjør krav på hvilken native-adresse. Tilordningene under overskriver
     # bare hverandre (og dict-inverteringen av fwd mister duplikater), så uten
     # denne bokføringen forsvinner et vers sporløst når to KJV-vers lander på
@@ -90,12 +117,20 @@ def build(src_nor, wp_dir, outdir):
     def ta(book, na_ch, na_v, kjv_ch, kjv_v):
         krav.setdefault((book, f"{na_ch}:{na_v}"), []).append(f"{kjv_ch}:{kjv_v}")
 
+    # kjv_to_no bygges nå EKSPLISITT. Den ble tidligere laget ved å invertere
+    # fwd, og da forsvant den ene halvparten av hver sammenslåing: to KJV-vers
+    # kan peke på samme norske vers, men et invertert 1:1-oppslag beholder bare
+    # den siste. Retningen native→kjv er fortsatt 1:1 (første KJV-vers).
+    rev = {}
     for book, chapters in bible.items():
-        native_bible.setdefault(book, {}); fwd.setdefault(book, {})
+        native_bible.setdefault(book, {}); fwd.setdefault(book, {}); rev.setdefault(book, {})
+        slukt = set()          # vers som er skjøtet inn i et JOINS-vers
         for ch_str, verses in chapters.items():
             kjv_ch = int(ch_str)
             for v_str, text in verses.items():
                 kjv_v = int(v_str)
+                if (kjv_ch, kjv_v) in slukt:
+                    continue          # alt skjøtet inn i forrige vers (JOINS)
                 # Neste vers' hint forteller hvor DETTE verset hører hjemme:
                 # står 6:2 på (5:21), er 6:1 nødvendigvis 5:20. Kilden mangler
                 # hintet på det første verset i et forskjøvet parti, og uten
@@ -110,6 +145,14 @@ def build(src_nor, wp_dir, outdir):
                     # foran); MERGES-tabellen er riktig sted. Vakten fanger den.
                     if not (na == kjv_ch and nb == kjv_v) and nb > 1:
                         arvet = (na, nb - 1)
+                    elif nb == 1 and kjv_v == 1 and na == kjv_ch:
+                        # Naboen er vers 1 i sitt kapittel ⇒ jeg hører til
+                        # SLUTTEN av forrige kapittel. 1930 har f.eks. 39 vers i
+                        # 1. Mos 42 der KJV har 38, og det 39. er det KJV kaller
+                        # 43:1 (verifisert mot Bibelselskapet).
+                        forrige = native_bible[book].get(str(na - 1))
+                        if forrige:
+                            arvet = (na - 1, max(int(x) for x in forrige) + 1)
                     # Aldri interpoler oppå noe som alt er tatt
                     if arvet and (book, f"{arvet[0]}:{arvet[1]}") in krav:
                         arvet = None
@@ -118,7 +161,27 @@ def build(src_nor, wp_dir, outdir):
                     deduped["bible"][book][ch_str][v_str] = clean
                     stats["deduped"] += 1
                 key = (book, kjv_ch, kjv_v)
-                if key in MERGES:
+                if key in JOINS:
+                    # To KJV-vers, ett norsk: skjøt tekstene og la BEGGE
+                    # KJV-adressene peke hit i kjv_to_no.
+                    na_ch, na_v = JOINS[key]
+                    neste = dedup(verses.get(str(kjv_v + 1), "") or "")[0]
+                    tekst = (strip_hints(clean) + " " + strip_hints(neste)).strip()
+                    native_bible[book].setdefault(str(na_ch),{})[str(na_v)] = tekst
+                    fwd[book][f"{na_ch}:{na_v}"] = f"{kjv_ch}:{kjv_v}"
+                    rev[book][f"{kjv_ch}:{kjv_v}"] = f"{na_ch}:{na_v}"
+                    rev[book][f"{kjv_ch}:{kjv_v + 1}"] = f"{na_ch}:{na_v}"
+                    ta(book, na_ch, na_v, kjv_ch, kjv_v)
+                    slukt.add((kjv_ch, kjv_v + 1))
+                    stats["joins"] += 1; stats["native_verses"] += 1
+                elif key in ADRESSER:
+                    no_ch, no_v = ADRESSER[key]
+                    native_bible[book].setdefault(str(no_ch),{})[str(no_v)] = strip_hints(clean)
+                    fwd[book][f"{no_ch}:{no_v}"] = f"{kjv_ch}:{kjv_v}"
+                    rev[book][f"{kjv_ch}:{kjv_v}"] = f"{no_ch}:{no_v}"
+                    ta(book, no_ch, no_v, kjv_ch, kjv_v)
+                    stats["native_verses"] += 1
+                elif key in MERGES:
                     (na_ch,na_v),(nb_ch,nb_v) = MERGES[key]
                     parts = HINT.split(clean, 1)
                     A, B = strip_hints(parts[0]), strip_hints(parts[-1])
@@ -126,6 +189,7 @@ def build(src_nor, wp_dir, outdir):
                     native_bible[book].setdefault(str(nb_ch),{})[str(nb_v)] = B
                     fwd[book][f"{na_ch}:{na_v}"] = f"{kjv_ch}:{kjv_v}"
                     fwd[book][f"{nb_ch}:{nb_v}"] = f"{kjv_ch}:{kjv_v}"
+                    rev[book][f"{kjv_ch}:{kjv_v}"] = f"{na_ch}:{na_v}"
                     ta(book, na_ch, na_v, kjv_ch, kjv_v)
                     ta(book, nb_ch, nb_v, kjv_ch, kjv_v)
                     stats["merges"] += 1; stats["native_verses"] += 2
@@ -133,16 +197,20 @@ def build(src_nor, wp_dir, outdir):
                     no_ch, no_v = hint_addr
                     native_bible[book].setdefault(str(no_ch),{})[str(no_v)] = strip_hints(clean)
                     fwd[book][f"{no_ch}:{no_v}"] = f"{kjv_ch}:{kjv_v}"
+                    rev[book][f"{kjv_ch}:{kjv_v}"] = f"{no_ch}:{no_v}"
                     ta(book, no_ch, no_v, kjv_ch, kjv_v)
                     stats["native_verses"] += 1
                 else:
                     # Uten hint: arv adressen fra naboen når den finnes, ellers
                     # er native == KJV (det normale i uforskjøvede partier).
-                    no_ch, no_v = arvet if arvet else (kjv_ch, kjv_v)
                     if arvet:
+                        no_ch, no_v = arvet
                         stats["interpolert"] += 1
+                    else:
+                        no_ch, no_v = kjv_ch, kjv_v + KAP_SKIFT.get((book, kjv_ch), 0)
                     native_bible[book].setdefault(str(no_ch),{})[str(no_v)] = strip_hints(clean)
                     fwd[book][f"{no_ch}:{no_v}"] = f"{kjv_ch}:{kjv_v}"
+                    rev[book][f"{kjv_ch}:{kjv_v}"] = f"{no_ch}:{no_v}"
                     ta(book, no_ch, no_v, kjv_ch, kjv_v)
                     stats["native_verses"] += 1
 
@@ -154,7 +222,6 @@ def build(src_nor, wp_dir, outdir):
             native_bible["19O"][str(ch)]["2"] = parts["2"]
         stats["titles"] += 1
 
-    rev = {b:{v:k for k,v in m.items()} for b,m in fwd.items()}
 
     os.makedirs(outdir, exist_ok=True)
     json.dump(deduped, open(f"{outdir}/nor1930.json","w",encoding="utf-8"), ensure_ascii=False)
@@ -182,6 +249,15 @@ def verify(src_nor, deduped, native_bible, krav=None):
             for v,t in vs.items():
                 if HINT.search(t):
                     problems.append(f"native {b} {c}:{v} har hint igjen: {t[:50]}")
+    # 1b) HULL: manglende versnummer i et native-kapittel. Fanger den klassen
+    #     vakten over ikke ser — et kapittel som ligger forskjøvet uten at noe
+    #     overlapper (Dan 11 manglet vers 1 til KAP_SKIFT kom på plass).
+    for b, chs in native_bible.items():
+        for c, vs in chs.items():
+            n = [int(x) for x in vs]
+            mangler = [i for i in range(1, max(n) + 1) if i not in n]
+            if mangler:
+                problems.append(f"HULL {names.get(b, b)} {c}: mangler vers {mangler}")
     # 2) per affected salme: native antall == KJV antall + forskyvning
     ps_native = native_bible["19O"]; ps_kjv = nor["19O"]
     for ch in [int(x) for x in open("/tmp/psalm_chapters.txt").read().split()]:
