@@ -526,19 +526,41 @@ def lookup_verses_native(book_id, chapter, verse_start=None, verse_end=None, tra
         "versification": "native", "verses": [],
     }
 
+    kbook = kjv["bible"].get(book_code, {}) if kjv is not None else {}
+    # Overskrift-splitt: der NORSK har et eget tittelvers (NO v1 er UMAPPET), legger
+    # KJV tittelen i "<<...>>" inni sitt vers 1. Vi splitter da KJV-verset så tittelen
+    # parres med det norske tittelverset og innholdet med NO v2. Salmer uten
+    # NO-forskyvning (f.eks. Sal 23) har mapping på v1 → ingen split, parentes står.
+    has_title = (kjv is not None
+                 and no_to_kjv.get(f"{chapter}:1") is None
+                 and "1" in nb.get(ch_str, {}))
+    title_bracket, v1_content = None, None
+    if has_title:
+        m = re.match(r"^\s*(<<.*?>>)\s*(.*)$", kbook.get(ch_str, {}).get("1", ""), re.S)
+        if m:
+            title_bracket, v1_content = m.group(1), m.group(2)
+        else:
+            has_title = False
+    bracket_used = False
+
     for v in range(v_start, v_end + 1):
         entry = {"verse": v}
         if translation in ("nor", "both") and str(v) in nb.get(ch_str, {}):
             entry["nor"] = nb[ch_str][str(v)]
         if kjv is not None:
             kref = no_to_kjv.get(f"{chapter}:{v}")
-            if kref:
-                kc, kv = kref.split(":")
+            if kref is None:
+                # Norsk tittelvers: KJV-tittelen "<<...>>" på det FØRSTE tittelverset;
+                # senere tittelvers (to-vers-titler) får ingen KJV.
+                if has_title and not bracket_used:
+                    entry["kjv"] = title_bracket
+                    bracket_used = True
             else:
-                kc, kv = ch_str, str(v)
-            kbook = kjv["bible"].get(book_code, {})
-            if kc in kbook and kv in kbook[kc]:
-                entry["kjv"] = kbook[kc][kv]
+                kc, kv = kref.split(":")
+                if has_title and kc == ch_str and kv == "1":
+                    entry["kjv"] = v1_content          # KJV v1 UTEN tittel-parentesen
+                elif kc in kbook and kv in kbook[kc]:
+                    entry["kjv"] = kbook[kc][kv]
         if "kjv" in entry or "nor" in entry:
             result["verses"].append(entry)
 
